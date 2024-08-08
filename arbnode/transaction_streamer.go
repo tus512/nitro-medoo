@@ -359,7 +359,7 @@ func (s *TransactionStreamer) addMessagesAndReorg(batch ethdb.Batch, lastMsgIdxT
 	s.reorgMutex.Lock()
 	defer s.reorgMutex.Unlock()
 
-	messagesResults, err := s.exec.Reorg(lastMsgIdxToKeep, newMessages, oldMessages)
+	messagesResults, err := s.exec.Reorg(lastMsgIdxToKeep + 1, newMessages, oldMessages)
 	if err != nil {
 		return err
 	}
