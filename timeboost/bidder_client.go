@@ -16,6 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
+	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 
 	"github.com/offchainlabs/nitro/cmd/genericconf"
 	"github.com/offchainlabs/nitro/cmd/util"
@@ -195,20 +196,33 @@ func (bd *BidderClient) Bid(
 	if (expressLaneController == common.Address{}) {
 		expressLaneController = bd.txOpts.From
 	}
+
+	domainSeparator, err := bd.auctionContract.DomainSeparator(&bind.CallOpts{
+		Context: ctx,
+	})
+	if err != nil {
+		return nil, err
+	}
 	newBid := &Bid{
 		ChainId:                bd.chainId,
 		ExpressLaneController:  expressLaneController,
 		AuctionContractAddress: bd.auctionContractAddress,
 		Round:                  CurrentRound(bd.initialRoundTimestamp, bd.roundDuration) + 1,
 		Amount:                 amount,
-		Signature:              nil,
 	}
-	sig, err := bd.signer(buildEthereumSignedMessage(newBid.ToMessageBytes()))
+	bidHash, err := newBid.ToEIP712Hash(domainSeparator)
+	if err != nil {
+		return nil, err
+	}
+
+	sig, err := bd.signer(bidHash.Bytes())
 	if err != nil {
 		return nil, err
 	}
 	sig[64] += 27
+
 	newBid.Signature = sig
+
 	promise := bd.submitBid(newBid)
 	if _, err := promise.Await(ctx); err != nil {
 		return nil, err

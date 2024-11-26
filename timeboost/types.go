@@ -10,6 +10,8 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/signer/core/apitypes"
+	"github.com/offchainlabs/nitro/util/signature"
 )
 
 type Bid struct {
@@ -33,19 +35,39 @@ func (b *Bid) ToJson() *JsonBid {
 	}
 }
 
-func (b *Bid) ToMessageBytes() []byte {
-	buf := new(bytes.Buffer)
-	// Encode uint256 values - each occupies 32 bytes
-	buf.Write(domainValue)
-	buf.Write(padBigInt(b.ChainId))
-	buf.Write(b.AuctionContractAddress[:])
-	roundBuf := make([]byte, 8)
-	binary.BigEndian.PutUint64(roundBuf, b.Round)
-	buf.Write(roundBuf)
-	buf.Write(padBigInt(b.Amount))
-	buf.Write(b.ExpressLaneController[:])
+func (b *Bid) ToEIP712Hash(domainSeparator [32]byte) (common.Hash, error) {
+	types := apitypes.Types{
+		"Bid": []apitypes.Type{
+			{Name: "round", Type: "uint64"},
+			{Name: "expressLaneController", Type: "address"},
+			{Name: "amount", Type: "uint256"},
+		},
+	}
 
-	return buf.Bytes()
+	message := apitypes.TypedDataMessage{
+		"round":                 b.Round,
+		"expressLaneController": b.ExpressLaneController,
+		"amount":                b.Amount,
+	}
+
+	typedData := apitypes.TypedData{
+		Types:       types,
+		PrimaryType: "Bid",
+		Message:     message,
+	}
+
+	messageHash, err := typedData.HashStruct(typedData.PrimaryType, typedData.Message)
+	if err != nil {
+		return common.Hash{}, err
+	}
+
+	bidHash := crypto.Keccak256Hash(
+		[]byte("\x19\x01"),
+		crypto.Keccak256Hash(domainSeparator[:]).Bytes(),
+		messageHash,
+	)
+
+	return bidHash, nil
 }
 
 type JsonBid struct {
