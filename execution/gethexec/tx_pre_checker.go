@@ -125,16 +125,19 @@ func PreCheckTx(bc *core.BlockChain, chainConfig *params.ChainConfig, header *ty
 	if err != nil {
 		return err
 	}
-	baseFee := header.BaseFee
-	if config.Strictness < TxPreCheckerStrictnessLikelyCompatible {
-		baseFee, err = arbos.L2PricingState().MinBaseFeeWei()
-		if err != nil {
-			return err
-		}
-	}
-	if arbmath.BigLessThan(tx.GasFeeCap(), baseFee) {
-		return fmt.Errorf("%w: address %v, maxFeePerGas: %s baseFee: %s", core.ErrFeeCapTooLow, sender, tx.GasFeeCap(), header.BaseFee)
-	}
+
+	// Medoo: Disable zero base fee check
+	// baseFee := header.BaseFee
+	// if config.Strictness < TxPreCheckerStrictnessLikelyCompatible {
+	// 	baseFee, err = arbos.L2PricingState().MinBaseFeeWei()
+	// 	if err != nil {
+	// 		return err
+	// 	}
+	// }
+	// if arbmath.BigLessThan(tx.GasFeeCap(), baseFee) {
+	// 	return fmt.Errorf("%w: address %v, maxFeePerGas: %s baseFee: %s", core.ErrFeeCapTooLow, sender, tx.GasFeeCap(), header.BaseFee)
+	// }
+	// EndMedoo
 	stateNonce := statedb.GetNonce(sender)
 	if tx.Nonce() < stateNonce {
 		return MakeNonceError(sender, tx.Nonce(), stateNonce)
