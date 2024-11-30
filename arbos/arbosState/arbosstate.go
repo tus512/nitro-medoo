@@ -60,6 +60,7 @@ type ArbosState struct {
 	brotliCompressionLevel storage.StorageBackedUint64 // brotli compression level used for pricing
 	backingStorage         *storage.Storage
 	Burner                 burn.Burner
+	myNumber               storage.StorageBackedUint64 // this is what we added
 }
 
 const MaxArbosVersionSupported uint64 = params.ArbosVersion_StylusChargingFixes
@@ -97,6 +98,7 @@ func OpenArbosState(stateDB vm.StateDB, burner burn.Burner) (*ArbosState, error)
 		backingStorage.OpenStorageBackedUint64(uint64(brotliCompressionLevelOffset)),
 		backingStorage,
 		burner,
+		backingStorage.OpenStorageBackedUint64(uint64(myNumberOffset)), // define your new state here
 	}, nil
 }
 
@@ -157,6 +159,7 @@ const (
 	genesisBlockNumOffset
 	infraFeeAccountOffset
 	brotliCompressionLevelOffset
+	myNumberOffset // define the offset of your new state here
 )
 
 type SubspaceID []byte
@@ -204,6 +207,8 @@ func InitializeArbosState(stateDB vm.StateDB, burner burn.Burner, chainConfig *p
 	_ = sto.SetUint64ByUint64(uint64(versionOffset), 1) // initialize to version 1; upgrade at end of this func if needed
 	_ = sto.SetUint64ByUint64(uint64(upgradeVersionOffset), 0)
 	_ = sto.SetUint64ByUint64(uint64(upgradeTimestampOffset), 0)
+	_ = sto.SetUint64ByUint64(uint64(myNumberOffset), 0) // initialize your new state around here
+
 	if desiredArbosVersion >= 2 {
 		_ = sto.SetByUint64(uint64(networkFeeAccountOffset), util.AddressToHash(initialChainOwner))
 	} else {
@@ -487,4 +492,15 @@ func (state *ArbosState) SetChainConfig(serializedChainConfig []byte) error {
 
 func (state *ArbosState) GenesisBlockNum() (uint64, error) {
 	return state.genesisBlockNum.Get()
+}
+
+// MedooTodo
+func (state *ArbosState) SetNewMyNumber(
+	newNumber uint64,
+) error {
+	return state.myNumber.Set(newNumber)
+}
+
+func (state *ArbosState) GetMyNumber() (uint64, error) {
+	return state.myNumber.Get()
 }
