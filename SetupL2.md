@@ -412,10 +412,10 @@ docker-compose/services/stats.yml => stats-db:POSTGRES_DB, stats: STATS**DB_URL&
 
 trước khi chạy câu lệnh thì phải sửa 1 số phần trong script setup
 
-`PRIVATE_KEY="0x980fd43ba377aa738a167cbd46b8b2c8c3ba5bef621a07c4afe57a35a59da781" L2_RPC_URL="https://site1.moralis-nodes.com/bsc-testnet/d7e9356ba4ec4480ba858b1d4c172608" L3_RPC_URL="http://localhost:8449" yarn run setup`
+`PRIVATE_KEY="" L2_RPC_URL="https://site1.moralis-nodes.com/bsc-testnet/d7e9356ba4ec4480ba858b1d4c172608" L3_RPC_URL="http://localhost:8449" yarn run setup`
 
 // Có thể chạy từ xa với tham số URL và orbitSetupScript.json
-`PRIVATE_KEY="0x980fd43ba377aa738a167cbd46b8b2c8c3ba5bef621a07c4afe57a35a59da781" L2_RPC_URL="https://site1.moralis-nodes.com/bsc-testnet/d7e9356ba4ec4480ba858b1d4c172608" L3_RPC_URL="http://54.254.131.144:8449" yarn run setup`
+`PRIVATE_KEY="" L2_RPC_URL="https://site1.moralis-nodes.com/bsc-testnet/d7e9356ba4ec4480ba858b1d4c172608" L3_RPC_URL="http://54.254.131.144:8449" yarn run setup`
 
 30.515853436324813362 BNB // Ban đầu
 30.41417 => 0.102 BNB // Deploy RollupCreator => 0xCAD3ae0523811b9d2eb3B26E12427ccE9D671c9A
