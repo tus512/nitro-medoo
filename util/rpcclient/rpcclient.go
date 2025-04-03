@@ -21,7 +21,8 @@ import (
 )
 
 type ClientConfig struct {
-	URL                       string        `json:"url,omitempty" koanf:"url"`
+	URLs                      []string      `json:"urls,omitempty" koanf:"urls"`
+	URL                       string        `json:"url,omitempty" koanf:"url"` // For backward compatibility
 	JWTSecret                 string        `json:"jwtsecret,omitempty" koanf:"jwtsecret"`
 	Timeout                   time.Duration `json:"timeout,omitempty" koanf:"timeout" reload:"hot"`
 	Retries                   uint          `json:"retries,omitempty" koanf:"retries" reload:"hot"`
@@ -30,8 +31,14 @@ type ClientConfig struct {
 	RetryErrors               string        `json:"retry-errors,omitempty" koanf:"retry-errors" reload:"hot"`
 	RetryDelay                time.Duration `json:"retry-delay,omitempty" koanf:"retry-delay"`
 	WebsocketMessageSizeLimit int64         `json:"websocket-message-size-limit,omitempty" koanf:"websocket-message-size-limit"`
+	HealthCheckInterval       time.Duration `json:"health-check-interval,omitempty" koanf:"health-check-interval"`
+	HealthCheckTimeout        time.Duration `json:"health-check-timeout,omitempty" koanf:"health-check-timeout"`
+	MaxConsecutiveFailures    int           `json:"max-consecutive-failures,omitempty" koanf:"max-consecutive-failures"`
 
-	retryErrors *regexp.Regexp
+	retryErrors         *regexp.Regexp
+	currentURLIndex     int
+	consecutiveFailures int
+	lastHealthCheck     time.Time
 }
 
 func (c *ClientConfig) Validate() error {
@@ -60,16 +67,21 @@ var TestClientConfig = ClientConfig{
 }
 
 var DefaultClientConfig = ClientConfig{
-	URL:                       "self-auth",
+	URLs:                      []string{"self-auth"},
+	URL:                       "self-auth", // For backward compatibility
 	JWTSecret:                 "",
 	Retries:                   3,
 	RetryErrors:               "websocket: close.*|dial tcp .*|.*i/o timeout|.*connection reset by peer|.*connection refused",
 	ArgLogLimit:               2048,
 	WebsocketMessageSizeLimit: 256 * 1024 * 1024,
+	HealthCheckInterval:       30 * time.Second,
+	HealthCheckTimeout:        5 * time.Second,
+	MaxConsecutiveFailures:    3,
 }
 
 func RPCClientAddOptions(prefix string, f *flag.FlagSet, defaultConfig *ClientConfig) {
-	f.String(prefix+".url", defaultConfig.URL, "url of server, use self for loopback websocket, self-auth for loopback with authentication")
+	f.StringSlice(prefix+".urls", defaultConfig.URLs, "list of RPC URLs to use with failover")
+	f.String(prefix+".url", defaultConfig.URL, "single RPC URL (for backward compatibility)")
 	f.String(prefix+".jwtsecret", defaultConfig.JWTSecret, "path to file with jwtsecret for validation - ignored if url is self or self-auth")
 	f.Duration(prefix+".connection-wait", defaultConfig.ConnectionWait, "how long to wait for initial connection")
 	f.Duration(prefix+".timeout", defaultConfig.Timeout, "per-response timeout (0-disabled)")
@@ -78,6 +90,9 @@ func RPCClientAddOptions(prefix string, f *flag.FlagSet, defaultConfig *ClientCo
 	f.String(prefix+".retry-errors", defaultConfig.RetryErrors, "Errors matching this regular expression are automatically retried")
 	f.Duration(prefix+".retry-delay", defaultConfig.RetryDelay, "delay between retries")
 	f.Int64(prefix+".websocket-message-size-limit", defaultConfig.WebsocketMessageSizeLimit, "websocket message size limit used by the RPC client. 0 means no limit")
+	f.Duration(prefix+".health-check-interval", defaultConfig.HealthCheckInterval, "interval between health checks")
+	f.Duration(prefix+".health-check-timeout", defaultConfig.HealthCheckTimeout, "timeout for health check requests")
+	f.Int(prefix+".max-consecutive-failures", defaultConfig.MaxConsecutiveFailures, "maximum number of consecutive failures before switching to next URL")
 }
 
 type RpcClient struct {
@@ -85,6 +100,9 @@ type RpcClient struct {
 	client    *rpc.Client
 	autoStack *node.Node
 	logId     atomic.Uint64
+
+	healthCheckCtx    context.Context
+	healthCheckCancel context.CancelFunc
 }
 
 func NewRpcClient(config ClientConfigFetcher, stack *node.Node) *RpcClient {
@@ -95,6 +113,9 @@ func NewRpcClient(config ClientConfigFetcher, stack *node.Node) *RpcClient {
 }
 
 func (c *RpcClient) Close() {
+	if c.healthCheckCancel != nil {
+		c.healthCheckCancel()
+	}
 	if c.client != nil {
 		c.client.Close()
 	}
@@ -164,7 +185,15 @@ func (c *RpcClient) CallContext(ctx_in context.Context, result interface{}, meth
 		return errors.New("not connected")
 	}
 	logId := c.logId.Add(1)
-	log.Trace("sending RPC request", "method", method, "logId", logId, "args", limitedArgumentsMarshal{c.config().ArgLogLimit, args})
+
+	// Log the current RPC URL being used
+	currentURL := c.config().GetCurrentURL()
+	log.Info("Making RPC call",
+		"method", method,
+		"logId", logId,
+		"rpc_url", currentURL,
+		"args", limitedArgumentsMarshal{c.config().ArgLogLimit, args})
+
 	var err error
 	for i := uint(0); i < c.config().Retries+1; i++ {
 		retryDelay := c.config().RetryDelay
@@ -197,6 +226,7 @@ func (c *RpcClient) CallContext(ctx_in context.Context, result interface{}, meth
 		logEntry := []interface{}{
 			"method", method,
 			"logId", logId,
+			"rpc_url", currentURL,
 			"err", err,
 			"result", limitedMarshal{limit, result},
 			"attempt", i,
@@ -223,16 +253,136 @@ func (c *RpcClient) CallContext(ctx_in context.Context, result interface{}, meth
 }
 
 func (c *RpcClient) BatchCallContext(ctx context.Context, b []rpc.BatchElem) error {
-	return c.client.BatchCallContext(ctx, b)
+	// Log the current RPC URL being used for batch calls
+	currentURL := c.config().GetCurrentURL()
+	log.Info("Making batch RPC call",
+		"rpc_url", currentURL,
+		"batch_size", len(b))
+
+	err := c.client.BatchCallContext(ctx, b)
+	if err != nil {
+		log.Error("Batch RPC call failed",
+			"rpc_url", currentURL,
+			"error", err)
+	}
+	return err
 }
 
 func (c *RpcClient) EthSubscribe(ctx context.Context, channel interface{}, args ...interface{}) (*rpc.ClientSubscription, error) {
-	return c.client.EthSubscribe(ctx, channel, args...)
+	// Log the current RPC URL being used for subscriptions
+	currentURL := c.config().GetCurrentURL()
+	log.Info("Creating new subscription",
+		"rpc_url", currentURL,
+		"args", limitedArgumentsMarshal{c.config().ArgLogLimit, args})
+
+	sub, err := c.client.EthSubscribe(ctx, channel, args...)
+	if err != nil {
+		log.Error("Failed to create subscription",
+			"rpc_url", currentURL,
+			"error", err)
+	}
+	return sub, err
 }
 
 func (c *RpcClient) Start(ctx_in context.Context) error {
-	url := c.config().URL
-	jwtPath := c.config().JWTSecret
+	config := c.config()
+	if config == nil {
+		return errors.New("no config provided")
+	}
+
+	// Handle backward compatibility
+	if config.URL != "" && len(config.URLs) == 0 {
+		config.URLs = []string{config.URL}
+	}
+
+	if len(config.URLs) == 0 {
+		return errors.New("no RPC URLs provided")
+	}
+
+	// Try to connect to the first URL
+	err := c.connect(ctx_in)
+	if err != nil {
+		return fmt.Errorf("failed to connect to initial RPC URL: %w", err)
+	}
+
+	// Start health check routine
+	c.healthCheckCtx, c.healthCheckCancel = context.WithCancel(ctx_in)
+	go c.healthCheckRoutine()
+
+	return nil
+}
+
+func (c *RpcClient) healthCheckRoutine() {
+	config := c.config()
+	if config == nil {
+		return
+	}
+
+	ticker := time.NewTicker(config.HealthCheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.healthCheckCtx.Done():
+			return
+		case <-ticker.C:
+			// config.NextURL()
+			// config.consecutiveFailures = 0
+
+			// if err := c.connect(c.healthCheckCtx); err != nil {
+			// 	log.Error("Failed to connect to next URL", "error", err)
+			// }
+
+			if err := c.performHealthCheck(); err != nil {
+				log.Warn("Health check failed", "error", err, "url", config.GetCurrentURL())
+				config.consecutiveFailures++
+
+				if config.consecutiveFailures >= config.MaxConsecutiveFailures {
+					log.Info("Switching to next RPC URL due to consecutive failures",
+						"failures", config.consecutiveFailures,
+						"current_url", config.GetCurrentURL())
+
+					config.NextURL()
+					config.consecutiveFailures = 0
+
+					if err := c.connect(c.healthCheckCtx); err != nil {
+						log.Error("Failed to connect to next URL", "error", err)
+					}
+				}
+			} else {
+				config.consecutiveFailures = 0
+			}
+		}
+	}
+}
+
+func (c *RpcClient) performHealthCheck() error {
+	if c.client == nil {
+		return errors.New("not connected")
+	}
+
+	ctx, cancel := context.WithTimeout(c.healthCheckCtx, c.config().HealthCheckTimeout)
+	defer cancel()
+
+	var result string
+	err := c.client.CallContext(ctx, &result, "eth_blockNumber")
+	if err != nil {
+		return fmt.Errorf("health check failed: %w", err)
+	}
+
+	return nil
+}
+
+func (c *RpcClient) connect(ctx_in context.Context) error {
+	config := c.config()
+	if config == nil {
+		return errors.New("no config provided")
+	}
+
+	url := config.GetCurrentURL()
+	log.Info("Attempting to connect to RPC", "url", url)
+
+	jwtPath := config.JWTSecret
 	if url == "self" {
 		if c.autoStack == nil {
 			return errors.New("self not supported for this connection")
@@ -256,11 +406,11 @@ func (c *RpcClient) Start(ctx_in context.Context) error {
 			return err
 		}
 	}
-	connTimeout := time.After(c.config().ConnectionWait)
+	connTimeout := time.After(config.ConnectionWait)
 	for {
 		var ctx context.Context
 		var cancelCtx context.CancelFunc
-		timeout := c.config().Timeout
+		timeout := config.Timeout
 		if timeout > 0 {
 			ctx, cancelCtx = context.WithTimeout(ctx_in, timeout)
 		} else {
@@ -269,23 +419,40 @@ func (c *RpcClient) Start(ctx_in context.Context) error {
 		var err error
 		var client *rpc.Client
 		if jwt == nil {
-			client, err = rpc.DialOptions(ctx, url, rpc.WithWebsocketMessageSizeLimit(c.config().WebsocketMessageSizeLimit))
+			client, err = rpc.DialOptions(ctx, url, rpc.WithWebsocketMessageSizeLimit(config.WebsocketMessageSizeLimit))
 		} else {
-			client, err = rpc.DialOptions(ctx, url, rpc.WithHTTPAuth(node.NewJWTAuth([32]byte(*jwt))), rpc.WithWebsocketMessageSizeLimit(c.config().WebsocketMessageSizeLimit))
+			client, err = rpc.DialOptions(ctx, url, rpc.WithHTTPAuth(node.NewJWTAuth([32]byte(*jwt))), rpc.WithWebsocketMessageSizeLimit(config.WebsocketMessageSizeLimit))
 		}
 		cancelCtx()
 		if err == nil {
 			c.client = client
+			log.Info("Successfully connected to RPC", "url", url)
 			return nil
 		}
 		if strings.Contains(err.Error(), "parse") ||
 			strings.Contains(err.Error(), "malformed") {
 			return fmt.Errorf("%w: url %s", err, url)
 		}
+		log.Warn("Failed to connect to RPC, retrying", "url", url, "error", err)
 		select {
 		case <-connTimeout:
 			return fmt.Errorf("timeout trying to connect lastError: %w", err)
 		case <-time.After(time.Second):
 		}
+	}
+}
+
+// GetCurrentURL returns the current URL from the list of URLs
+func (c *ClientConfig) GetCurrentURL() string {
+	if len(c.URLs) == 0 {
+		return ""
+	}
+	return c.URLs[c.currentURLIndex]
+}
+
+// NextURL advances to the next URL in the list
+func (c *ClientConfig) NextURL() {
+	if len(c.URLs) > 1 {
+		c.currentURLIndex = (c.currentURLIndex + 1) % len(c.URLs)
 	}
 }
