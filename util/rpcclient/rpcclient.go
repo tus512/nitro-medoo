@@ -188,7 +188,7 @@ func (c *RpcClient) CallContext(ctx_in context.Context, result interface{}, meth
 
 	// Log the current RPC URL being used
 	currentURL := c.config().GetCurrentURL()
-	log.Info("Making RPC call",
+	log.Trace("Making RPC call",
 		"method", method,
 		"logId", logId,
 		"rpc_url", currentURL,
@@ -253,12 +253,7 @@ func (c *RpcClient) CallContext(ctx_in context.Context, result interface{}, meth
 }
 
 func (c *RpcClient) BatchCallContext(ctx context.Context, b []rpc.BatchElem) error {
-	// Log the current RPC URL being used for batch calls
 	currentURL := c.config().GetCurrentURL()
-	log.Info("Making batch RPC call",
-		"rpc_url", currentURL,
-		"batch_size", len(b))
-
 	err := c.client.BatchCallContext(ctx, b)
 	if err != nil {
 		log.Error("Batch RPC call failed",
@@ -269,12 +264,7 @@ func (c *RpcClient) BatchCallContext(ctx context.Context, b []rpc.BatchElem) err
 }
 
 func (c *RpcClient) EthSubscribe(ctx context.Context, channel interface{}, args ...interface{}) (*rpc.ClientSubscription, error) {
-	// Log the current RPC URL being used for subscriptions
 	currentURL := c.config().GetCurrentURL()
-	log.Info("Creating new subscription",
-		"rpc_url", currentURL,
-		"args", limitedArgumentsMarshal{c.config().ArgLogLimit, args})
-
 	sub, err := c.client.EthSubscribe(ctx, channel, args...)
 	if err != nil {
 		log.Error("Failed to create subscription",
@@ -360,6 +350,10 @@ func (c *RpcClient) performHealthCheck() error {
 	if c.client == nil {
 		return errors.New("not connected")
 	}
+
+	currentURL := c.config().GetCurrentURL()
+	log.Info("Making RPC health check call",
+		"rpc_url", currentURL)
 
 	ctx, cancel := context.WithTimeout(c.healthCheckCtx, c.config().HealthCheckTimeout)
 	defer cancel()
