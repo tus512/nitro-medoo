@@ -61,6 +61,15 @@ type ArbosState struct {
 	backingStorage         *storage.Storage
 	Burner                 burn.Burner
 	myNumber               storage.StorageBackedUint64 // this is what we added
+
+	// New fee-free feature states
+	dailyFreeTxLastUsed     *storage.Storage             // address -> last free tx timestamp
+	userWhitelist           *addressSet.AddressSet       // addresses with all transactions free
+	contractWhitelist       *addressSet.AddressSet       // contracts that receive free transactions
+	adminAddress            storage.StorageBackedAddress // admin address for managing whitelists
+	enableDailyFreeTx       storage.StorageBackedUint64  // 1 if enabled, 0 if disabled
+	enableUserWhitelist     storage.StorageBackedUint64  // 1 if enabled, 0 if disabled
+	enableContractWhitelist storage.StorageBackedUint64  // 1 if enabled, 0 if disabled
 }
 
 const MaxArbosVersionSupported uint64 = params.ArbosVersion_StylusChargingFixes
@@ -98,7 +107,14 @@ func OpenArbosState(stateDB vm.StateDB, burner burn.Burner) (*ArbosState, error)
 		backingStorage.OpenStorageBackedUint64(uint64(brotliCompressionLevelOffset)),
 		backingStorage,
 		burner,
-		backingStorage.OpenStorageBackedUint64(uint64(myNumberOffset)), // define your new state here
+		backingStorage.OpenStorageBackedUint64(uint64(myNumberOffset)),
+		backingStorage.OpenCachedSubStorage(dailyFreeTxSubspace),
+		addressSet.OpenAddressSet(backingStorage.OpenCachedSubStorage(userWhitelistSubspace)),
+		addressSet.OpenAddressSet(backingStorage.OpenCachedSubStorage(contractWhitelistSubspace)),
+		backingStorage.OpenStorageBackedAddress(uint64(adminAddressOffset)),
+		backingStorage.OpenStorageBackedUint64(uint64(enableDailyFreeTxOffset)),
+		backingStorage.OpenStorageBackedUint64(uint64(enableUserWhitelistOffset)),
+		backingStorage.OpenStorageBackedUint64(uint64(enableContractWhitelistOffset)),
 	}, nil
 }
 
@@ -159,21 +175,31 @@ const (
 	genesisBlockNumOffset
 	infraFeeAccountOffset
 	brotliCompressionLevelOffset
-	myNumberOffset // define the offset of your new state here
+	myNumberOffset
+	dailyFreeTxLastUsedOffset
+	userWhitelistOffset
+	contractWhitelistOffset
+	adminAddressOffset
+	enableDailyFreeTxOffset
+	enableUserWhitelistOffset
+	enableContractWhitelistOffset
 )
 
 type SubspaceID []byte
 
 var (
-	l1PricingSubspace    SubspaceID = []byte{0}
-	l2PricingSubspace    SubspaceID = []byte{1}
-	retryablesSubspace   SubspaceID = []byte{2}
-	addressTableSubspace SubspaceID = []byte{3}
-	chainOwnerSubspace   SubspaceID = []byte{4}
-	sendMerkleSubspace   SubspaceID = []byte{5}
-	blockhashesSubspace  SubspaceID = []byte{6}
-	chainConfigSubspace  SubspaceID = []byte{7}
-	programsSubspace     SubspaceID = []byte{8}
+	l1PricingSubspace         SubspaceID = []byte{0}
+	l2PricingSubspace         SubspaceID = []byte{1}
+	retryablesSubspace        SubspaceID = []byte{2}
+	addressTableSubspace      SubspaceID = []byte{3}
+	chainOwnerSubspace        SubspaceID = []byte{4}
+	sendMerkleSubspace        SubspaceID = []byte{5}
+	blockhashesSubspace       SubspaceID = []byte{6}
+	chainConfigSubspace       SubspaceID = []byte{7}
+	programsSubspace          SubspaceID = []byte{8}
+	dailyFreeTxSubspace       SubspaceID = []byte{9}
+	userWhitelistSubspace     SubspaceID = []byte{10}
+	contractWhitelistSubspace SubspaceID = []byte{11}
 )
 
 var PrecompileMinArbOSVersions = make(map[common.Address]uint64)
@@ -239,6 +265,21 @@ func InitializeArbosState(stateDB vm.StateDB, burner burn.Burner, chainConfig *p
 	if err != nil {
 		return nil, err
 	}
+
+	// // Initialize fee-free features
+	// if err := aState.SetDailyFreeTxEnabled(chainConfig.ArbitrumChainParams.EnableDailyFreeTx); err != nil {
+	// 	return nil, err
+	// }
+	// if err := aState.SetUserWhitelistEnabled(chainConfig.ArbitrumChainParams.EnableUserWhitelist); err != nil {
+	// 	return nil, err
+	// }
+	// if err := aState.SetContractWhitelistEnabled(chainConfig.ArbitrumChainParams.EnableContractWhitelist); err != nil {
+	// 	return nil, err
+	// }
+	// if err := aState.SetAdminAddress(chainConfig.ArbitrumChainParams.AdminAddress); err != nil {
+	// 	return nil, err
+	// }
+
 	if desiredArbosVersion > 1 {
 		err = aState.UpgradeArbosVersion(desiredArbosVersion, true, stateDB, chainConfig)
 		if err != nil {
@@ -503,4 +544,90 @@ func (state *ArbosState) SetNewMyNumber(
 
 func (state *ArbosState) GetMyNumber() (uint64, error) {
 	return state.myNumber.Get()
+}
+
+// New getter/setter methods for fee-free features
+func (state *ArbosState) GetDailyFreeTxLastUsed(addr common.Address) (uint64, error) {
+	addrAsHash := common.BytesToHash(addr.Bytes())
+	timestamp, err := state.dailyFreeTxLastUsed.GetUint64(addrAsHash)
+	if err != nil {
+		return 0, err
+	}
+	return timestamp, nil
+}
+
+func (state *ArbosState) SetDailyFreeTxLastUsed(addr common.Address, timestamp uint64) error {
+	addrAsHash := common.BytesToHash(addr.Bytes())
+	return state.dailyFreeTxLastUsed.SetUint64(addrAsHash, timestamp)
+}
+
+func (state *ArbosState) IsUserWhitelisted(addr common.Address) (bool, error) {
+	return state.userWhitelist.IsMember(addr)
+}
+
+func (state *ArbosState) AddUserToWhitelist(addr common.Address) error {
+	return state.userWhitelist.Add(addr)
+}
+
+func (state *ArbosState) RemoveUserFromWhitelist(addr common.Address) error {
+	return state.userWhitelist.Remove(addr, state.arbosVersion)
+}
+
+func (state *ArbosState) IsContractWhitelisted(addr common.Address) (bool, error) {
+	return state.contractWhitelist.IsMember(addr)
+}
+
+func (state *ArbosState) AddContractToWhitelist(addr common.Address) error {
+	return state.contractWhitelist.Add(addr)
+}
+
+func (state *ArbosState) RemoveContractFromWhitelist(addr common.Address) error {
+	return state.contractWhitelist.Remove(addr, state.arbosVersion)
+}
+
+func (state *ArbosState) GetAdminAddress() (common.Address, error) {
+	return state.adminAddress.Get()
+}
+
+func (state *ArbosState) SetAdminAddress(addr common.Address) error {
+	return state.adminAddress.Set(addr)
+}
+
+func (state *ArbosState) IsDailyFreeTxEnabled() (bool, error) {
+	enabled, err := state.enableDailyFreeTx.Get()
+	return enabled == 1, err
+}
+
+func (state *ArbosState) SetDailyFreeTxEnabled(enabled bool) error {
+	var val uint64
+	if enabled {
+		val = 1
+	}
+	return state.enableDailyFreeTx.Set(val)
+}
+
+func (state *ArbosState) IsUserWhitelistEnabled() (bool, error) {
+	enabled, err := state.enableUserWhitelist.Get()
+	return enabled == 1, err
+}
+
+func (state *ArbosState) SetUserWhitelistEnabled(enabled bool) error {
+	var val uint64
+	if enabled {
+		val = 1
+	}
+	return state.enableUserWhitelist.Set(val)
+}
+
+func (state *ArbosState) IsContractWhitelistEnabled() (bool, error) {
+	enabled, err := state.enableContractWhitelist.Get()
+	return enabled == 1, err
+}
+
+func (state *ArbosState) SetContractWhitelistEnabled(enabled bool) error {
+	var val uint64
+	if enabled {
+		val = 1
+	}
+	return state.enableContractWhitelist.Set(val)
 }

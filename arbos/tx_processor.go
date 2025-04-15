@@ -431,6 +431,48 @@ func GetPosterGas(state *arbosState.ArbosState, baseFee *big.Int, runMode core.M
 }
 
 func (p *TxProcessor) GasChargingHook(gasRemaining *uint64) (common.Address, error) {
+	// Check if transaction should be fee-free
+	shouldBeFree := false
+
+	// Check daily free transaction
+	if enabled, err := p.state.IsDailyFreeTxEnabled(); err == nil && enabled {
+		lastUsed, err := p.state.GetDailyFreeTxLastUsed(p.msg.From)
+		if err == nil {
+			// Check if 24 hours have passed since last free transaction
+			timeSinceLastFree := p.evm.Context.Time - lastUsed
+			if timeSinceLastFree >= 86400 { // 24 hours in seconds
+				shouldBeFree = true
+				// Update last used timestamp
+				p.state.SetDailyFreeTxLastUsed(p.msg.From, p.evm.Context.Time)
+			}
+		}
+	}
+
+	// Check user whitelist
+	if !shouldBeFree {
+		if enabled, err := p.state.IsUserWhitelistEnabled(); err == nil && enabled {
+			if whitelisted, err := p.state.IsUserWhitelisted(p.msg.From); err == nil && whitelisted {
+				shouldBeFree = true
+			}
+		}
+	}
+
+	// Check contract whitelist
+	if !shouldBeFree && p.msg.To != nil {
+		if enabled, err := p.state.IsContractWhitelistEnabled(); err == nil && enabled {
+			if whitelisted, err := p.state.IsContractWhitelisted(*p.msg.To); err == nil && whitelisted {
+				shouldBeFree = true
+			}
+		}
+	}
+
+	// If transaction is fee-free, set gas price to 0
+	if shouldBeFree {
+		p.msg.GasPrice = big.NewInt(0)
+		p.msg.GasFeeCap = big.NewInt(0)
+		p.msg.GasTipCap = big.NewInt(0)
+	}
+
 	// Because a user pays a 1-dimensional gas price, we must re-express poster L1 calldata costs
 	// as if the user was buying an equivalent amount of L2 compute gas. This hook determines what
 	// that cost looks like, ensuring the user can pay and saving the result for later reference.
